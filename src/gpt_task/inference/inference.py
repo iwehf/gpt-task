@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, List, Literal, Mapping, Sequence
+from threading import Thread
+from typing import Any, List, Literal, Mapping, Sequence, Callable
 
 import torch
 from pydantic import TypeAdapter
-from transformers import AutoConfig, AutoTokenizer, pipeline, set_seed
+from transformers import (
+    AutoConfig,
+    AutoTokenizer,
+    pipeline,
+    set_seed,
+    TextStreamer,
+    TextIteratorStreamer,
+)
 
 from gpt_task import models
 from gpt_task.config import Config
@@ -38,6 +46,8 @@ def run_task(
     seed: int = 0,
     dtype: Literal["float16", "bfloat16", "float32", "auto"] = "auto",
     quantize_bits: Literal[4, 8] | None = None,
+    stream: bool = False,
+    stream_handle: Callable[[str], None] | None = None,
     config: Config | None = None,
 ) -> models.GPTTaskResponse:
     if args is None:
@@ -124,9 +134,32 @@ def run_task(
     else:
         inputs = "\n".join(c["content"] for c in chats)
 
+    streamer = None
+    stream_handle_thread = None
+    if stream:
+        streamer = TextIteratorStreamer(
+            tokenizer=tokenizer,  # type: ignore
+            skip_prompt=True,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=True,
+        )
+
+        def process_stream():
+            for new_text in streamer:
+                if stream_handle is not None:
+                    stream_handle(new_text)
+                else:
+                    print(new_text, flush=True, end="")
+            if stream_handle is None:
+                print("\n")
+
+        stream_handle_thread = Thread(target=process_stream, daemon=True)
+        stream_handle_thread.start()
+
     output = pipe(
         inputs,
         return_tensors=True,
+        streamer=streamer,
         **generation_config,
     )
     assert output is not None
@@ -184,4 +217,8 @@ def run_task(
     }
 
     _logger.info("Text generation completes")
+
+    # wait text stream handle thread finish
+    if stream_handle_thread is not None:
+        stream_handle_thread.join()
     return resp
