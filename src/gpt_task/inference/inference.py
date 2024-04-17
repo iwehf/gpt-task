@@ -16,8 +16,6 @@ from .utils import load_model_kwargs, use_deterministic_mode
 
 _logger = logging.getLogger(__name__)
 
-use_deterministic_mode()
-
 
 def _find_prompt_tokens(input_tokens: List[int], output_tokens: List[int]) -> int:
     start = output_tokens.index(input_tokens[0])
@@ -58,6 +56,7 @@ def run_task(
     _logger.debug(f"task args: {args}")
 
     set_seed(args.seed)
+    use_deterministic_mode()
 
     model_args: Dict[str, Any] = {"model": args.model, "dtype": args.dtype}
     if args.quantize_bits is not None:
