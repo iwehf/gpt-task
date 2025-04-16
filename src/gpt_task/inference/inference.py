@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, List, Literal, Mapping, Sequence
+from typing import Any, Dict, List, Literal, Mapping, Sequence, Union, Callable
 
 import torch
 from pydantic import TypeAdapter
 from transformers import AutoConfig, AutoTokenizer, pipeline, set_seed
+from transformers.generation.streamers import BaseStreamer
 
 from gpt_task import models
 from gpt_task.config import Config
@@ -18,14 +19,142 @@ from .key import generate_model_key
 _logger = logging.getLogger(__name__)
 
 
+class TokenStreamer(BaseStreamer):
+    """Streamer that yields tokens as they are generated."""
+
+    def __init__(self, tokenizer, input_tokens: List[int], model_name: str, stream_callback=None):
+        self.tokenizer = tokenizer
+        self.input_tokens = input_tokens  # Store the actual input tokens
+        self.tokens = []
+        self.is_eos = False
+        self.completion_tokens = 0
+        self.is_done = False
+        self.text_queue = []
+        self.found_prompt_end = False  # Flag to track if we've found the end of the prompt
+        self.first_token = True  # Flag to track if this is the first token being returned
+        self.prompt_tokens = len(input_tokens)  # Initialize with input length, will be updated when prompt end is found
+        self.model_name = model_name
+        self.stream_callback = stream_callback  # Callback to send stream responses
+
+    def put(self, value):
+        if len(value.shape) > 1:
+            value = value[0]
+
+        token_list = value.tolist()
+
+        for token in token_list:
+            self.tokens.append(token)
+
+            # Always check for prompt end first
+            if not self.found_prompt_end:
+                if len(self.tokens) >= len(self.input_tokens):
+                    # Try to find the end of the input sequence
+                    prompt_end = _find_prompt_tokens(self.input_tokens, self.tokens)
+                    if prompt_end > 0:
+                        self.found_prompt_end = True
+                        self.prompt_tokens = prompt_end  # Update prompt tokens count to match non-streaming mode
+                        self.tokens = self.tokens[prompt_end:]  # Keep only the new tokens
+                        _logger.debug(f"Found prompt end at position {prompt_end}")
+
+                        # Check if we've already collected any completion tokens
+                        for completion_token in self.tokens:
+                            self.completion_tokens += 1
+                            # Process each completion token (decode, etc.)
+                            new_text = self.tokenizer.decode(
+                                [completion_token],
+                                skip_special_tokens=True,
+                                clean_up_tokenization_spaces=True
+                            )
+                            if new_text and self.stream_callback:
+                                if self.first_token:
+                                    new_text = new_text.lstrip()
+                                    self.first_token = False
+                                self._send_token(new_text)
+
+                            # Check for EOS in completion tokens
+                            if completion_token == self.tokenizer.eos_token_id:
+                                self.is_eos = True
+                                break
+                        continue
+
+            # For tokens after prompt identification
+            if self.found_prompt_end:
+                # Check for EOS after we've found the prompt
+                if token == self.tokenizer.eos_token_id:
+                    self.is_eos = True
+                    break
+
+                self.completion_tokens += 1
+
+                # Decode the new token
+                new_text = self.tokenizer.decode(
+                    [token],
+                    skip_special_tokens=True,
+                    clean_up_tokenization_spaces=True
+                )
+                if new_text and self.stream_callback:
+                    if self.first_token:
+                        new_text = new_text.lstrip()
+                        self.first_token = False
+                    self._send_token(new_text)
+
+    def _send_token(self, text):
+        """Send a token through the callback."""
+        if self.stream_callback:
+            response = {
+                "model": self.model_name,
+                "choices": [{
+                    "index": 0,
+                    "delta": {"role": "assistant", "content": text},
+                    "finish_reason": None
+                }],
+                "usage": self.get_usage()
+            }
+            self.stream_callback(response)
+
+    def end(self):
+        """Called when generation is complete."""
+        self.is_done = True
+        # Send final chunk with finish_reason
+        if self.stream_callback:
+            finish_reason = self.get_finish_reason()
+            _logger.debug(f"Sending final chunk with finish_reason={finish_reason}")
+            response = {
+                "model": self.model_name,
+                "choices": [{
+                    "index": 0,
+                    "delta": {"role": "assistant", "content": ""},
+                    "finish_reason": finish_reason
+                }],
+                "usage": self.get_usage()
+            }
+            self.stream_callback(response)
+
+    def get_finish_reason(self) -> Literal["stop", "length"]:
+        return "stop" if self.is_eos else "length"
+
+    def get_usage(self) -> models.Usage:
+        return {
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.prompt_tokens + self.completion_tokens
+        }
+
+
 def _find_prompt_tokens(input_tokens: List[int], output_tokens: List[int]) -> int:
-    start = output_tokens.index(input_tokens[0])
-    if start == -1:
+
+    _logger.debug(f"Finding prompt tokens: input_tokens={input_tokens}")
+    _logger.debug(f"Finding prompt tokens: output_tokens={output_tokens}")
+
+    try:
+        start = output_tokens.index(input_tokens[0])
+        _logger.debug(f"Finding prompt tokens: start={start}")
+        end = output_tokens.index(input_tokens[-1], start + len(input_tokens) - 1)
+        _logger.debug(f"Finding prompt tokens: end={end}")
+        return end + 1
+    except ValueError:
+        _logger.debug(f"Finding prompt tokens: ValueError")
         return 0
-    end = output_tokens.index(input_tokens[-1], start + len(input_tokens) - 1)
-    if end == -1:
-        return 0
-    return end + 1
 
 
 @wrap_error
@@ -34,18 +163,21 @@ def run_task(
     *,
     model: str | None = None,
     messages: Sequence[models.Message | Mapping[str, Any]] | None = None,
+    tools: Sequence[Dict[str, Any]] | None = None,
     generation_config: models.GPTGenerationConfig | Mapping[str, Any] | None = None,
+    stream_callback: Callable[[models.GPTTaskStreamResponse], None] | None = None,
     seed: int = 0,
     dtype: Literal["float16", "bfloat16", "float32", "auto"] = "auto",
     quantize_bits: Literal[4, 8] | None = None,
     config: Config | None = None,
     model_cache: ModelCache | None = None,
-) -> models.GPTTaskResponse:
+) -> Union[models.GPTTaskResponse, models.GPTTaskStreamResponse]:
     if args is None:
         args = models.GPTTaskArgs.model_validate(
             {
                 "model": model,
                 "messages": messages,
+                "tools": tools,
                 "generation_config": generation_config,
                 "seed": seed,
                 "dtype": dtype,
@@ -131,12 +263,55 @@ def run_task(
                 generation_config[k] = v
 
     chats = [dict(**m) for m in args.messages]
-    if tokenizer.chat_template is not None:
-        inputs = tokenizer.apply_chat_template(
-            chats, tokenize=False, add_generation_prompt=True
-        )
+
+    # Check if model supports chat templates
+    has_chat_template = hasattr(tokenizer, "chat_template") and tokenizer.chat_template is not None
+    _logger.debug(f"Model has chat template: {has_chat_template}")
+
+    # Warn if tools are requested but model doesn't support them
+    if args.tools and not has_chat_template:
+        _logger.warning("Tools were provided but model does not support chat template. Tool calling will be disabled.")
+        args.tools = None  # Disable tools since they won't work
+
+    if has_chat_template:
+        template_args = {
+            "tokenize": False,
+            "add_generation_prompt": True
+        }
+
+        if args.tools is not None:
+            template_args["tools"] = [dict(**t) for t in args.tools]
+            _logger.debug(f"Adding tools to chat template: {template_args['tools']}")
+
+        inputs = tokenizer.apply_chat_template(chats,**template_args)
+        _logger.debug("Applied chat template for input formatting")
     else:
+        _logger.debug("No chat template available, falling back to basic formatting")
         inputs = "\n".join(c["content"] for c in chats)
+
+    _logger.debug(f"Generation config: {generation_config}")
+    _logger.debug(f"Input text: {inputs}")
+
+    input_tokens = tokenizer.encode(inputs, add_special_tokens=False)
+
+    if stream_callback is not None:
+        # Create a callback-based streamer
+        streamer = TokenStreamer(tokenizer, input_tokens, args.model, stream_callback)
+        generation_config["streamer"] = streamer
+        generation_config["pad_token_id"] = tokenizer.eos_token_id
+        generation_config["use_cache"] = True
+
+        # Run the pipe function directly - it will call the streamer's put method
+        # which will in turn call the stream_callback for each token
+        pipe(inputs, **generation_config)
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        _logger.info("Text generation completes")
+
+        # Return None since we're using callbacks instead of returning a generator
+        return None
 
     output = pipe(
         inputs,
@@ -145,6 +320,8 @@ def run_task(
     )
     assert output is not None
     assert isinstance(output, list)
+
+    _logger.debug(f"Raw output: {output}")
 
     res_token_ids = []
     for single in output:
@@ -155,7 +332,6 @@ def run_task(
 
     del output
 
-    input_tokens = tokenizer.encode(inputs, add_special_tokens=False)
     prompt_tokens = _find_prompt_tokens(input_tokens, res_token_ids[0])
 
     del input_tokens
@@ -163,6 +339,7 @@ def run_task(
     completion_tokens = 0
     output_texts = []
     finish_reasons = []
+
     for token_ids in res_token_ids:
         # when the last token is eos token, finish reason is stop, otherwise is length
         if token_ids[-1] == tokenizer.eos_token_id:
@@ -177,7 +354,8 @@ def run_task(
             token_ids[prompt_tokens:],
             skip_special_tokens=True,
             clean_up_tokenization_spaces=True,
-        )
+        ).strip()
+
         output_texts.append(text)
 
     usage: models.Usage = {
