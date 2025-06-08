@@ -10,6 +10,7 @@ A general framework to define and execute the llm text generation task.
 * Model quantizing (INT4 or INT8)
 * Fine grained control text generation arguments
 * ChatGPT style response
+* **RTX 50 series Support** - Now supports NVIDIA RTX 50 series graphics cards
 
 
 ### Example
@@ -50,7 +51,7 @@ $ source ./venv/bin/activate
 
 Install the dependencies and the library:
 ```shell
-(venv) $ pip install -r requirments.txt && pip install -e .
+(venv) $ pip install -r requirements_cuda.txt && pip install -e .
 ```
 
 Check and run the examples:
