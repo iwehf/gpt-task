@@ -10,8 +10,7 @@ A general framework to define and execute the llm text generation task.
 * Model quantizing (INT4 or INT8)
 * Fine grained control text generation arguments
 * ChatGPT style response
-* **RTX 5090 Blackwell Architecture Support** - Optimized for latest NVIDIA hardware
-* **CUDA 12.6+ Support** - Enhanced performance with latest CUDA toolkit
+* **RTX 50 series Support** - Now supports NVIDIA RTX 50 series graphics cards
 
 
 ### Example
@@ -58,9 +57,6 @@ Install the dependencies and the library:
 Check and run the examples:
 ```shell
 (venv) $ python ./examples/gpt2_example.py
-
-# For RTX 5090
-(venv) $ python ./examples/rtx5090_example.py
 ```
 
 More explanations can be found in the doc:
