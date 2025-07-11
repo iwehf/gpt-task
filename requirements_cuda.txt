@@ -1,20 +1,20 @@
---extra-index-url https://download.pytorch.org/whl/cu118
-torch==2.2.0+cu118
---extra-index-url https://download.pytorch.org/whl/cu118
-torchaudio==2.2.0+cu118
---extra-index-url https://download.pytorch.org/whl/cu118
-torchvision==0.17.0+cu118
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.7.0+cu128
+--extra-index-url https://download.pytorch.org/whl/cu128
+torchaudio==2.7.0+cu128
+--extra-index-url https://download.pytorch.org/whl/cu128
+torchvision==0.22.0+cu128
 
 numpy==1.26.2
 scipy==1.11.4
-transformers==4.46.3
+transformers==4.52.4
 transformers_stream_generator==0.0.5
 sentencepiece==0.2.0
-accelerate==0.33.0
-bitsandbytes==0.44.1
+accelerate==1.2.0
+bitsandbytes==0.46.0
 tiktoken==0.8.0
 einops==0.8.0
 pydantic==2.7.4
 pydantic-settings==2.6.1
-huggingface_hub==0.24.6
+huggingface_hub==0.32.4
 python-dotenv==1.0.1
