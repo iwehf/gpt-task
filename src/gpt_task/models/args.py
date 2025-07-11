@@ -16,6 +16,7 @@ class Message(TypedDict, total=False):
 
 class GPTGenerationConfig(TypedDict, total=False):
     max_new_tokens: int
+    stop_strings: List[str]
 
     do_sample: bool
     num_beams: int
@@ -24,6 +25,7 @@ class GPTGenerationConfig(TypedDict, total=False):
     typical_p: float
     top_k: int
     top_p: float
+    min_p: float
     repetition_penalty: float
 
     num_return_sequences: int
